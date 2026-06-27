@@ -9,5 +9,7 @@ services:
         generateValue: true
       - key: APP_PIN
         sync: false        # Renderダッシュボードで手動設定
-      - key: FIREBASE_SERVICE_ACCOUNT
-        sync: false        # Renderダッシュボードで手動設定（サービスアカウントJSONの中身）
+      - key: SUPABASE_URL
+        sync: false        # Renderダッシュボードで手動設定
+      - key: SUPABASE_KEY
+        sync: false        # Renderダッシュボードで手動設定
