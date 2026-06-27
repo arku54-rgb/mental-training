@@ -13,6 +13,13 @@ import os
 import json
 from datetime import date, datetime, timedelta
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore as fstore
+    _FIREBASE_AVAILABLE = True
+except ImportError:
+    _FIREBASE_AVAILABLE = False
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
@@ -21,13 +28,27 @@ OBSIDIAN_URL = "https://localhost:27124"
 PORT = int(os.environ.get("PORT", 8891))
 APP_PIN = os.environ.get("APP_PIN", "4216")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-USE_CLOUD = bool(SUPABASE_URL and SUPABASE_KEY)
+FIREBASE_SA = os.environ.get("FIREBASE_SERVICE_ACCOUNT", "")
+USE_CLOUD = bool(FIREBASE_SA and _FIREBASE_AVAILABLE)
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
+
+_fb_db = None
+
+def _get_db():
+    global _fb_db
+    if _fb_db is None:
+        sa = json.loads(FIREBASE_SA)
+        cred = credentials.Certificate(sa)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        _fb_db = fstore.client()
+    return _fb_db
+
+def _doc_id(path):
+    return path.replace("/", "--")
 
 
 def login_required(f):
@@ -77,54 +98,35 @@ def obsidian_put(path, content):
         return resp.status
 
 
-def _sb_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-def supabase_read(path):
-    encoded = urllib.parse.quote(path, safe="")
-    url = f"{SUPABASE_URL}/rest/v1/notes?path=eq.{encoded}&select=content"
-    req = urllib.request.Request(url, headers=_sb_headers())
-    with urllib.request.urlopen(req) as resp:
-        rows = json.loads(resp.read())
-    if not rows:
+def firebase_read(path):
+    doc = _get_db().collection("notes").document(_doc_id(path)).get()
+    if not doc.exists:
         raise FileNotFoundError(path)
-    return rows[0]["content"]
+    return doc.to_dict()["content"]
 
-def supabase_write(path, content):
-    url = f"{SUPABASE_URL}/rest/v1/notes"
-    payload = json.dumps({
-        "path": path, "content": content,
-        "updated_at": datetime.utcnow().isoformat(), "synced": False,
-    }).encode()
-    headers = {**_sb_headers(), "Prefer": "resolution=merge-duplicates"}
-    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
-    with urllib.request.urlopen(req): pass
+def firebase_write(path, content):
+    _get_db().collection("notes").document(_doc_id(path)).set({
+        "path": path,
+        "content": content,
+        "synced": False,
+        "updated_at": fstore.SERVER_TIMESTAMP,
+    })
 
-def supabase_pending():
-    url = f"{SUPABASE_URL}/rest/v1/notes?synced=eq.false&select=path,content"
-    req = urllib.request.Request(url, headers=_sb_headers())
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+def firebase_pending():
+    docs = _get_db().collection("notes").where("synced", "==", False).stream()
+    return [{"path": d.to_dict()["path"], "content": d.to_dict()["content"]} for d in docs]
 
-def supabase_mark_synced(paths):
+def firebase_mark_synced(paths):
+    db = _get_db()
     for path in paths:
-        encoded = urllib.parse.quote(path, safe="")
-        url = f"{SUPABASE_URL}/rest/v1/notes?path=eq.{encoded}"
-        payload = json.dumps({"synced": True}).encode()
-        headers = {**_sb_headers(), "Prefer": "return=minimal"}
-        req = urllib.request.Request(url, data=payload, method="PATCH", headers=headers)
-        with urllib.request.urlopen(req): pass
+        db.collection("notes").document(_doc_id(path)).update({"synced": True})
 
 
 def read_note(path):
-    return supabase_read(path) if USE_CLOUD else obsidian_get(path)
+    return firebase_read(path) if USE_CLOUD else obsidian_get(path)
 
 def write_note(path, content):
-    if USE_CLOUD: supabase_write(path, content)
+    if USE_CLOUD: firebase_write(path, content)
     else: obsidian_put(path, content)
 
 
@@ -399,7 +401,7 @@ def pending_sync():
     if not USE_CLOUD:
         return jsonify([])
     try:
-        return jsonify(supabase_pending())
+        return jsonify(firebase_pending())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -409,7 +411,7 @@ def pending_sync():
 def mark_synced():
     paths = request.json.get("paths", [])
     try:
-        supabase_mark_synced(paths)
+        firebase_mark_synced(paths)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
