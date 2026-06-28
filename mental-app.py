@@ -393,6 +393,26 @@ def save_weekly():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/debug")
+def debug():
+    try:
+        test_url = f"{SUPABASE_URL}/rest/v1/notes?limit=1&select=path"
+        req = urllib.request.Request(test_url, headers=_sb_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            sb_ok = True
+            sb_status = resp.status
+    except Exception as e:
+        sb_ok = False
+        sb_status = str(e)
+    return jsonify({
+        "USE_CLOUD": USE_CLOUD,
+        "SUPABASE_URL": SUPABASE_URL[:50] if SUPABASE_URL else "NOT SET",
+        "has_key": bool(SUPABASE_KEY),
+        "supabase_reachable": sb_ok,
+        "supabase_status": sb_status,
+    })
+
+
 @app.route("/api/pending-sync", methods=["GET"])
 @login_required
 def pending_sync():
