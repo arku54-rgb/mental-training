@@ -13,6 +13,9 @@ import os
 import json
 from datetime import date, datetime, timedelta
 
+import psycopg2
+import psycopg2.extras
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
@@ -21,9 +24,8 @@ OBSIDIAN_URL = "https://localhost:27124"
 PORT = int(os.environ.get("PORT", 8891))
 APP_PIN = os.environ.get("APP_PIN", "4216")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
-USE_CLOUD = bool(SUPABASE_URL and SUPABASE_KEY)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_CLOUD = bool(DATABASE_URL)
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
@@ -77,47 +79,41 @@ def obsidian_put(path, content):
         return resp.status
 
 
-def _sb_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
+def _get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def supabase_read(path):
-    encoded = urllib.parse.quote(path, safe="")
-    url = f"{SUPABASE_URL}/rest/v1/notes?path=eq.{encoded}&select=content"
-    req = urllib.request.Request(url, headers=_sb_headers())
-    with urllib.request.urlopen(req) as resp:
-        rows = json.loads(resp.read())
-    if not rows:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT content FROM notes WHERE path = %s", (path,))
+            row = cur.fetchone()
+    if not row:
         raise FileNotFoundError(path)
-    return rows[0]["content"]
+    return row[0]
 
 def supabase_write(path, content):
-    url = f"{SUPABASE_URL}/rest/v1/notes"
-    payload = json.dumps({
-        "path": path, "content": content,
-        "updated_at": datetime.utcnow().isoformat(), "synced": False,
-    }).encode()
-    headers = {**_sb_headers(), "Prefer": "resolution=merge-duplicates"}
-    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
-    with urllib.request.urlopen(req): pass
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO notes (path, content, synced, updated_at)
+                   VALUES (%s, %s, false, now())
+                   ON CONFLICT (path) DO UPDATE
+                   SET content = EXCLUDED.content, synced = false, updated_at = now()""",
+                (path, content),
+            )
+        conn.commit()
 
 def supabase_pending():
-    url = f"{SUPABASE_URL}/rest/v1/notes?synced=eq.false&select=path,content"
-    req = urllib.request.Request(url, headers=_sb_headers())
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT path, content FROM notes WHERE synced = false")
+            return [dict(r) for r in cur.fetchall()]
 
 def supabase_mark_synced(paths):
-    for path in paths:
-        encoded = urllib.parse.quote(path, safe="")
-        url = f"{SUPABASE_URL}/rest/v1/notes?path=eq.{encoded}"
-        payload = json.dumps({"synced": True}).encode()
-        headers = {**_sb_headers(), "Prefer": "return=minimal"}
-        req = urllib.request.Request(url, data=payload, method="PATCH", headers=headers)
-        with urllib.request.urlopen(req): pass
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE notes SET synced = true WHERE path = ANY(%s)", (paths,))
+        conn.commit()
 
 
 def read_note(path):
@@ -395,21 +391,21 @@ def save_weekly():
 
 @app.route("/api/debug")
 def debug():
-    try:
-        test_url = f"{SUPABASE_URL}/rest/v1/notes?limit=1&select=path"
-        req = urllib.request.Request(test_url, headers=_sb_headers())
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            sb_ok = True
-            sb_status = resp.status
-    except Exception as e:
-        sb_ok = False
-        sb_status = str(e)
+    db_ok, db_status = False, "NOT SET"
+    if USE_CLOUD:
+        try:
+            with _get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM notes")
+                    cnt = cur.fetchone()[0]
+            db_ok, db_status = True, f"ok ({cnt} rows)"
+        except Exception as e:
+            db_status = str(e)
     return jsonify({
         "USE_CLOUD": USE_CLOUD,
-        "SUPABASE_URL": SUPABASE_URL[:50] if SUPABASE_URL else "NOT SET",
-        "has_key": bool(SUPABASE_KEY),
-        "supabase_reachable": sb_ok,
-        "supabase_status": sb_status,
+        "DATABASE_URL": DATABASE_URL[:50] + "..." if DATABASE_URL else "NOT SET",
+        "db_reachable": db_ok,
+        "db_status": db_status,
     })
 
 
