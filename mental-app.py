@@ -21,8 +21,8 @@ OBSIDIAN_URL = "https://localhost:27124"
 PORT = int(os.environ.get("PORT", 8891))
 APP_PIN = os.environ.get("APP_PIN", "4216")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 USE_CLOUD = bool(SUPABASE_URL and SUPABASE_KEY)
 
 ssl_ctx = ssl.create_default_context()
